@@ -192,6 +192,19 @@
     .incognito-error .ie-copy-btn:hover{background:var(--gold2);}
     .incognito-error .ie-copy-btn.copied{background:var(--green);color:#fff;}
     .incognito-error .ie-note{font-size:11px;color:var(--text3);max-width:360px;}
+    /* ── STICKERS SUBSECTION ── */
+    .stk-wrap{margin:0 20px 20px;border:1px solid var(--border);border-radius:var(--r2);background:var(--bg2);}
+    .stk-wrap summary{list-style:none;cursor:pointer;padding:14px 16px;font-size:13px;color:var(--text2);display:flex;align-items:center;gap:8px;user-select:none;}
+    .stk-wrap summary::-webkit-details-marker{display:none;}
+    .stk-wrap summary:hover{color:var(--gold);}
+    .stk-chev{display:inline-block;transition:transform .2s;color:var(--gold);}
+    .stk-wrap[open] .stk-chev{transform:rotate(90deg);}
+    .stk-count{margin-left:auto;font-size:11px;color:var(--text3);background:var(--bg4);border-radius:10px;padding:2px 9px;}
+    .stk-wrap .products-grid{padding:4px 14px 18px;}
+    .product-card.is-sticker .card-img-wrap{aspect-ratio:1/1;}
+    .product-card.is-sticker .card-img-wrap img{object-fit:contain;padding:10px;}
+    .card-img-wrap .card-img-placeholder{font-size:24px;opacity:.3;}
+    .product-card{content-visibility:auto;contain-intrinsic-size:auto 190px auto 420px;}
   </style>
 </head>
 <body>
@@ -370,7 +383,7 @@ function loaderStart() {
     }
   }
   loaderSetFact(PW_FACTS[_loaderFactIdx]);
-  loaderSetProgress(5, 'Connecting to Drive…', '');
+  loaderSetProgress(5, 'Loading catalogue…', '');
   let dotActive = 0;
   _loaderDotsTimer = setInterval(() => {
     for (let i = 0; i < 5; i++) {
@@ -401,7 +414,8 @@ function loaderDone() {
   }
 }
 
-const APPS_SCRIPT_URL              = 'https://script.google.com/macros/s/AKfycbxsS_u9zH0HS-4tU5tj8B46DILLC3LSOU6w_rh-QJidBdyqcquY-FFlv-jnC2kG28PM/exec';
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const CATALOG_API                  = 'https://catalog-production-1a5fe42a.up.railway.app';
 const EMAILJS_PUBLIC_KEY           = 'e_4rILdmqc48SJ5Kw';
 const EMAILJS_SERVICE_ID           = 'service_wi071qz';
 const EMAILJS_TEAM_TEMPLATE_ID     = 'template_14pb9hf';
@@ -413,95 +427,116 @@ const SIZES = [
   {key:'a5',    label:'A5',     dim:'154 × 223 mm'},
   {key:'pocket',label:'Pocket', dim:'62 × 89 mm'}
 ];
+const STICKER_SIZES = [{key:'stk', label:'Sticker', dim:'Die-cut'}];
+const ALL_SIZES = [...SIZES, ...STICKER_SIZES];
+const sizesFor = kind => kind === 'sticker' ? STICKER_SIZES : SIZES;
+
+const LS_CATALOG  = 'pw_catalog_v2';
+const LS_CART     = 'pw_cart_v2';
+const LS_CHECKOUT = 'pw_checkout_v1';
 
 emailjs.init({publicKey: EMAILJS_PUBLIC_KEY});
 
-let categories = [];   // [{id, name, files:[{id,name}]}]
-let allProducts = [];  // flat list for search
-let cart = {};
+let categories = [];     // [{name, posters:[[sku,thumb]], stickers:[[sku,thumb]]}]
+let products = {};       // sku -> {sku, t, cat, kind}
+let cart = {};           // sku -> {sku, kind, sizes:{key:qty}}
 let lastOrder = null;
+let catalogVersion = null;
 const tapState = {};
 
-// ── INCOGNITO ERROR ──────────────────────────────────────────────────────────
-function incognitoErrorHTML() {
-  const url = window.location.href;
-  return `<div class="incognito-error">
-    <div class="ie-icon">🕶️</div>
-    <h2>Open in Chrome Incognito</h2>
-    <p>Your browser extensions are blocking the store from loading. Please open this page in a <strong style="color:var(--gold2)">Chrome Incognito window</strong> — it takes 10 seconds.</p>
-    <div class="ie-steps">
-      <p>How to open incognito</p>
-      <div class="ie-step"><div class="ie-num">1</div><span>Click the button below to copy this page's link</span></div>
-      <div class="ie-step"><div class="ie-num">2</div><span>Open <strong style="color:var(--text)">Google Chrome</strong> → press <strong style="color:var(--text)">Ctrl+Shift+N</strong> (Windows) or <strong style="color:var(--text)">⌘+Shift+N</strong> (Mac)</span></div>
-      <div class="ie-step"><div class="ie-num">3</div><span>Paste the link in the incognito address bar and press Enter</span></div>
-    </div>
-    <button class="ie-copy-btn" id="ieCopyBtn" onclick="
-      navigator.clipboard.writeText('${url}').then(() => {
-        const btn = document.getElementById('ieCopyBtn');
-        btn.textContent = '✓ Link Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = 'Copy Link to Open in Incognito →'; btn.classList.remove('copied'); }, 3000);
-      });
-    ">Copy Link to Open in Incognito →</button>
-    <p class="ie-note">On mobile? Tap the three dots in Chrome → <em>New Incognito Tab</em> → paste the link.</p>
-  </div>`;
+// ── BROWSER STORAGE (everything wrapped: private mode / blocked storage must not break the site) ──
+function lsGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch{return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
+function lsDel(k){try{localStorage.removeItem(k);}catch{}}
+
+function saveCart(){lsSet(LS_CART,cart);}
+function loadCart(){
+  const c=lsGet(LS_CART);
+  if(c&&typeof c==='object')Object.values(c).forEach(e=>{if(e&&e.sku&&e.sizes)cart[e.sku]=e;});
+}
+
+const CHK_FIELDS=['chkName','chkPhone','chkEmail','chkStreet','chkCity','chkState','chkPin','chkCountry','chkNote'];
+function saveCheckout(){const o={};CHK_FIELDS.forEach(id=>{o[id]=val(id);});lsSet(LS_CHECKOUT,o);}
+function loadCheckout(){
+  const o=lsGet(LS_CHECKOUT)||{};
+  CHK_FIELDS.forEach(id=>{const el=document.getElementById(id);if(el&&o[id])el.value=o[id];});
+  CHK_FIELDS.forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('input',saveCheckout);});
 }
 
 // ── LOAD ──────────────────────────────────────────────────────────────────────
-window.addEventListener('load', () => { loaderStart(); loadCategories(); });
+window.addEventListener('load', () => {
+  loadCart();
+  loadCheckout();
+  syncUI();
+  const cached = lsGet(LS_CATALOG);
+  if (cached && Array.isArray(cached.categories)) {
+    applyCatalog(cached);          // instant: show what this browser saw last time
+    refreshCatalog(true);          // then quietly check for new designs
+  } else {
+    loaderStart();
+    refreshCatalog(false);
+  }
+});
 
-function loadCategories() {
-  // Simulate incremental progress while waiting (Apps Script returns all at once)
-  let fakeLoaded = 0;
-  const fakeTotal = 15;
-  const fakeTick = setInterval(() => {
-    if (fakeLoaded < fakeTotal - 1) {
-      fakeLoaded++;
-      loaderUpdate(fakeLoaded, fakeTotal);
-    }
-  }, 1800);
-
-  jsonpCall('action=listCategories', 60000)
+function refreshCatalog(quiet){
+  fetch(CATALOG_API + '/catalog.json', {cache:'no-cache'})
+    .then(r => { if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
     .then(data => {
-      clearInterval(fakeTick);
-      if (!Array.isArray(data) || !data.length) {
-        loaderDone();
-        document.getElementById('storeContent').innerHTML = incognitoErrorHTML();
-        return;
-      }
-      categories = data;
-      allProducts = [];
-      categories.forEach(cat => {
-        (cat.files||[]).forEach(f => {
-          allProducts.push({id:f.id, name:f.name, categoryId:cat.id, categoryName:cat.name});
-        });
-      });
-      loaderUpdate(categories.length, categories.length);
-      setTimeout(() => {
-        loaderDone();
-        setTimeout(() => {
-          renderPills();
-          renderStore();
-        }, 400);
-      }, 600);
+      if (!data || !Array.isArray(data.categories)) throw new Error('bad catalog');
+      lsSet(LS_CATALOG, data);
+      if (data.version === catalogVersion) return;
+      if (!quiet) { loaderDone(); setTimeout(() => applyCatalog(data), 300); }
+      else applyCatalog(data, true);
     })
     .catch(err => {
-      clearInterval(fakeTick);
-      loaderDone();
-      document.getElementById('storeContent').innerHTML = incognitoErrorHTML();
+      console.error('Catalog load failed:', err);
+      if (!quiet) { loaderDone(); document.getElementById('storeContent').innerHTML = loadErrorHTML(); }
     });
 }
+
+function applyCatalog(data, keepScroll){
+  const y = window.scrollY;
+  catalogVersion = data.version;
+  categories = data.categories;
+  products = {};
+  categories.forEach(cat => {
+    cat.posters.forEach(([sku,t]) => { products[sku] = {sku, t, cat:cat.name, kind:'poster'}; });
+    cat.stickers.forEach(([sku,t]) => { products[sku] = {sku, t, cat:cat.name, kind:'sticker'}; });
+  });
+  renderPills();
+  renderStore();
+  syncUI();
+  if (document.getElementById('viewSearch').classList.contains('active')) doSearch(document.getElementById('searchInput').value.trim());
+  if (keepScroll) window.scrollTo(0, y);
+}
+
+function loadErrorHTML(){
+  return `<div class="incognito-error">
+    <div class="ie-icon">📡</div>
+    <h2>Couldn't load the catalogue</h2>
+    <p>Please check your internet connection and try again. If it keeps happening, message us and we'll sort it out.</p>
+    <button class="ie-copy-btn" onclick="location.reload()">Try Again</button>
+  </div>`;
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function thumbUrl(t){return t ? CATALOG_API + '/thumbs/' + t : '';}
+function thumbFor(sku){const p=products[sku];return p?thumbUrl(p.t):'';}
+function lineSku(sku,sizeKey){return sizeKey==='stk' ? sku : `${sku}-${sizeKey.toUpperCase()}`;}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function domId(s){return String(s).replace(/[^A-Za-z0-9]/g,'_');}
+function val(id){return(document.getElementById(id)||{}).value?.trim()||'';}
+function plural(n,w){return `${n} ${w}${n!==1?'s':''}`;}
 
 // ── CATEGORY PILLS ────────────────────────────────────────────────────────────
 function renderPills() {
   const wrap  = document.getElementById('catPillsWrap');
   const pills = document.getElementById('catPills');
   wrap.style.display = 'flex';
-
   pills.innerHTML = categories.map((cat, i) => {
-    const cover = cat.files && cat.files.length ? cat.files[0].id : null;
+    const cover = (cat.posters[0] || cat.stickers[0] || [])[1];
     const imgHTML = cover
-      ? `<div class="pill-img-wrap"><img src="${thumb(cover)}" alt="${esc(cat.name)}" onerror="this.parentNode.outerHTML='<div class=pill-icon>🎨</div>'"></div>`
+      ? `<div class="pill-img-wrap"><img src="${thumbUrl(cover)}" alt="" loading="lazy" decoding="async"></div>`
       : `<div class="pill-icon">🎨</div>`;
     return `<div class="cat-pill" id="pill-${i}" onclick="scrollToCategory(${i})">
       ${imgHTML}
@@ -510,45 +545,63 @@ function renderPills() {
   }).join('');
 }
 
-// ── RENDER ALL CATEGORIES + POSTERS ──────────────────────────────────────────
+// ── STORE ───────────────────────────────────────────────────────────────────
+// Poster cards are all in the page (so jumping to a category lands exactly), but the browser
+// skips drawing off-screen cards (content-visibility) and only downloads a thumbnail when it
+// scrolls near the screen (loading=lazy). Sticker cards are only built when their section is opened.
 function renderStore() {
   const html = categories.map((cat, i) => `
     <div class="cat-section" id="cat-section-${i}">
       <div class="cat-section-header">
         <div class="cat-section-title">${esc(cat.name)}</div>
-        <div class="cat-section-count">${(cat.files||[]).length} poster${(cat.files||[]).length!==1?'s':''}</div>
+        <div class="cat-section-count">${plural(cat.posters.length,'poster')}${cat.stickers.length?` · ${plural(cat.stickers.length,'sticker')}`:''}</div>
       </div>
       <div class="cat-divider"></div>
-      <div class="products-grid">
-        ${(cat.files||[]).map(f => productCardHTML(f)).join('')}
-      </div>
+      ${cat.posters.length ? `<div class="products-grid">${cat.posters.map(([sku]) => cardHTML(sku)).join('')}</div>` : ''}
+      ${stickerBoxHTML(cat.name, cat.stickers.map(([sku]) => sku))}
     </div>`).join('');
   document.getElementById('storeContent').innerHTML = html;
   setupScrollSpy();
+}
+
+function stickerBoxHTML(catName, skus){
+  if (!skus.length) return '';
+  return `
+      <details class="stk-wrap" ontoggle="onStickerToggle(this)" data-skus="${esc(skus.join('|'))}">
+        <summary><span class="stk-chev">▸</span> ${esc(catName)} Stickers <span class="stk-count">${skus.length}</span></summary>
+        <div class="products-grid stk-grid"></div>
+      </details>`;
+}
+
+function onStickerToggle(det){
+  const grid = det.querySelector('.stk-grid');
+  if (det.open && !grid.childElementCount) grid.innerHTML = det.dataset.skus.split('|').map(cardHTML).join('');
 }
 
 // ── SCROLL TO CATEGORY ────────────────────────────────────────────────────────
 function scrollToCategory(idx) {
   const el = document.getElementById(`cat-section-${idx}`);
   if (!el) return;
-  // Offset: header + search + pills + a little breathing room
   const offset = 64 + 49 + 80 + 12;
-  const top = el.getBoundingClientRect().top + window.scrollY - offset;
-  window.scrollTo({top, behavior:'smooth'});
+  // Off-screen cards use an estimated height until drawn, so jump, let them draw, and re-aim.
+  const go = () => window.scrollTo({top: el.getBoundingClientRect().top + window.scrollY - offset, behavior:'instant'});
+  go();
+  requestAnimationFrame(() => { go(); setTimeout(go, 150); setTimeout(go, 400); });
   setActivePill(idx);
 }
 
 function setActivePill(idx) {
   document.querySelectorAll('.cat-pill').forEach((p,i) => p.classList.toggle('active', i===idx));
-  // Scroll pill into view
   const pill = document.getElementById(`pill-${idx}`);
   if (pill) pill.scrollIntoView({behavior:'smooth', block:'nearest', inline:'center'});
 }
 
 // ── SCROLL SPY ────────────────────────────────────────────────────────────────
+let spyObserver = null;
 function setupScrollSpy() {
+  if (spyObserver) spyObserver.disconnect();
   const offset = 64 + 49 + 80 + 60;
-  const observer = new IntersectionObserver(entries => {
+  spyObserver = new IntersectionObserver(entries => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
         const idx = parseInt(entry.target.id.replace('cat-section-',''));
@@ -558,32 +611,35 @@ function setupScrollSpy() {
   }, { rootMargin: `-${offset}px 0px -60% 0px`, threshold: 0 });
   categories.forEach((_, i) => {
     const el = document.getElementById(`cat-section-${i}`);
-    if (el) observer.observe(el);
+    if (el) spyObserver.observe(el);
   });
 }
 
 // ── PRODUCT CARD ──────────────────────────────────────────────────────────────
-function productCardHTML(p) {
-  const name = cleanName(p.name);
-  const rows = SIZES.map(s => `
+function cardHTML(sku) {
+  const p = products[sku]; if (!p) return '';
+  const did = domId(sku);
+  const rows = sizesFor(p.kind).map(s => {
+    const q = cart[sku] ? (cart[sku].sizes[s.key]||0) : 0;
+    return `
     <tr>
       <td style="padding-right:4px"><div class="variant-label">${s.label}</div></td>
       <td>
         <div class="smart-qty">
-          <button class="sq-dec" onclick="changeQty('${p.id}','${s.key}',-1)">−</button>
-          <div class="sq-display${cart[p.id]&&(cart[p.id].sizes[s.key]||0)>0?' active':''}" id="sqd-${p.id}-${s.key}">${cart[p.id]?(cart[p.id].sizes[s.key]||0):0}</div>
-          <button class="sq-inc" onclick="smartIncrement('${p.id}','${s.key}')">+</button>
+          <button class="sq-dec" onclick="changeQty('${esc(sku)}','${s.key}',-1)">−</button>
+          <div class="sq-display${q>0?' active':''}" data-q="${did}-${s.key}">${q}</div>
+          <button class="sq-inc" onclick="smartIncrement('${esc(sku)}','${s.key}')">+</button>
         </div>
       </td>
-    </tr>`).join('');
+    </tr>`;}).join('');
   return `
-    <div class="product-card">
+    <div class="product-card${p.kind==='sticker'?' is-sticker':''}">
       <div class="card-img-wrap">
-        <img src="${thumb(p.id)}" alt="${esc(name)}" loading="lazy"
-          onerror="this.parentNode.innerHTML='<div class=card-img-placeholder><span style=font-size:24px;opacity:.2>🖼</span><span>${esc(name.slice(0,12))}</span></div>'"/>
+        <img src="${thumbUrl(p.t)}" alt="${esc(sku)}" loading="lazy" decoding="async" width="400" height="580"
+          onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'card-img-placeholder',textContent:'🖼'}))"/>
       </div>
       <div class="card-body">
-        <div class="card-title">${esc(name)}</div>
+        <div class="card-title">${esc(sku)}</div>
         <table class="variants-table">
           <thead><tr><th>Size</th><th>Qty</th></tr></thead>
           <tbody>${rows}</tbody>
@@ -606,57 +662,44 @@ function onSearch(q) {
 }
 
 function doSearch(q) {
-  const ql = q.toLowerCase();
+  if (!q) return;
+  const ql = q.toLowerCase().replace(/\s+/g,'');
+  const groups = [];
+  categories.forEach(cat => {
+    const nameHit = cat.name.toLowerCase().includes(ql);
+    const pick = list => (nameHit ? list : list.filter(([sku]) => sku.toLowerCase().replace(/\s+/g,'').includes(ql))).map(([sku])=>sku);
+    const posters = pick(cat.posters), stickers = pick(cat.stickers);
+    if (posters.length || stickers.length) groups.push({cat, posters, stickers});
+  });
 
-  // Find matching categories
-  const catHits = categories.filter(cat =>
-    cat.name.toLowerCase().includes(ql) ||
-    (cat.files||[]).some(f => cleanName(f.name).toLowerCase().includes(ql))
-  );
-
-  if (!catHits.length) {
-    // No matches at all
-    document.getElementById('searchContent').innerHTML = `
+  const sc = document.getElementById('searchContent');
+  if (!groups.length) {
+    sc.innerHTML = `
       <div class="sr-back" style="padding-top:20px">
         <button class="sr-back-btn" onclick="clearSearch()">← All Collections</button>
-        <span class="sr-title" style="color:var(--text3);font-size:13px">No results for "<strong style="color:var(--gold2)">${esc(q)}</strong>"</span>
+        <span class="sr-title">No results for "<strong style="color:var(--gold2)">${esc(q)}</strong>"</span>
       </div>`;
     showView('search');
     return;
   }
 
-  // Build search results: matching categories on top, each with their full poster grid
-  // Non-matching categories hidden
-  let html = `
+  sc.innerHTML = `
     <div class="sr-back">
       <button class="sr-back-btn" onclick="clearSearch()">← All Collections</button>
-      <span class="sr-title">${catHits.length} collection${catHits.length!==1?'s':''} matching "<strong style="color:var(--gold2)">${esc(q)}</strong>"</span>
-    </div>`;
-
-  catHits.forEach(cat => {
-    // Filter posters within this category that match, OR show all if the category name matches
-    const catNameMatch = cat.name.toLowerCase().includes(ql);
-    const matchingFiles = catNameMatch
-      ? (cat.files||[])  // whole category name matches → show all its posters
-      : (cat.files||[]).filter(f => cleanName(f.name).toLowerCase().includes(ql));
-
-    html += `
+      <span class="sr-title">${plural(groups.length,'collection')} matching "<strong style="color:var(--gold2)">${esc(q)}</strong>"</span>
+    </div>` + groups.map((g, gi) => `
       <div class="cat-section">
         <div class="cat-section-header" style="position:static">
           <div style="display:flex;align-items:center;gap:10px">
             <span class="sr-cat-badge">COLLECTION</span>
-            <div class="cat-section-title">${esc(cat.name)}</div>
+            <div class="cat-section-title">${esc(g.cat.name)}</div>
           </div>
-          <div class="cat-section-count">${matchingFiles.length} poster${matchingFiles.length!==1?'s':''}</div>
+          <div class="cat-section-count">${plural(g.posters.length,'poster')}${g.stickers.length?` · ${plural(g.stickers.length,'sticker')}`:''}</div>
         </div>
         <div class="cat-divider"></div>
-        <div class="products-grid">
-          ${matchingFiles.map(f => productCardHTML(f)).join('')}
-        </div>
-      </div>`;
-  });
-
-  document.getElementById('searchContent').innerHTML = html;
+        ${g.posters.length?`<div class="products-grid">${g.posters.map(cardHTML).join('')}</div>`:''}
+        ${stickerBoxHTML(g.cat.name, g.stickers)}
+      </div>`).join('');
   showView('search');
   window.scrollTo(0,0);
 }
@@ -668,52 +711,54 @@ function clearSearch() {
 }
 
 // ── QTY LOGIC ─────────────────────────────────────────────────────────────────
-function entry(pid) {
-  const p = allProducts.find(x=>x.id===pid);
-  if (!cart[pid]) cart[pid] = {name:p?p.name:pid, id:pid, sizes:{a3:0,a4:0,a5:0,pocket:0}};
-  return cart[pid];
+function entry(sku) {
+  const p = products[sku];
+  if (!cart[sku]) cart[sku] = {sku, kind: p ? p.kind : 'poster', sizes:{}};
+  return cart[sku];
 }
+const entryQty = e => Object.values(e.sizes).reduce((a,v)=>a+(v||0),0);
 
-function changeQty(pid, sk, delta) {
-  const e = entry(pid);
+function changeQty(sku, sk, delta) {
+  const e = entry(sku);
   e.sizes[sk] = Math.max(0, (e.sizes[sk]||0) + delta);
   const qty = e.sizes[sk];
-  document.querySelectorAll(`#sqd-${pid}-${sk}`).forEach(el => {
+  document.querySelectorAll(`[data-q="${domId(sku)}-${sk}"]`).forEach(el => {
     el.textContent = qty; el.classList.toggle('active', qty > 0);
   });
-  if (Object.values(e.sizes).reduce((a,v)=>a+v,0) === 0) delete cart[pid];
+  if (entryQty(e) === 0) delete cart[sku];
+  saveCart();
   syncUI();
 }
 
-function smartIncrement(pid, sk) {
-  const key = `${pid}-${sk}`;
+function smartIncrement(sku, sk) {
+  const key = `${sku}-${sk}`;
   if (!tapState[key]) tapState[key] = {times:[]};
   const st = tapState[key];
   st.times.push(Date.now());
   if (st.times.length > 5) st.times.shift();
   clearTimeout(st.timer);
-  st.timer = setTimeout(()=>{st.times=[];setSpeedDot(pid,sk,'normal');}, 750);
+  st.timer = setTimeout(()=>{st.times=[];setSpeedDot(sku,sk,'normal');}, 750);
   let delta = 1;
   if (st.times.length >= 2) {
     const r=st.times.slice(-3); let g=0;
     for(let j=1;j<r.length;j++) g+=r[j]-r[j-1];
-    const avg=g/(r.length-1), cur=(cart[pid]||{sizes:{[sk]:0}}).sizes[sk]||0;
-    if(avg<600){delta=cur<5?1:5;setSpeedDot(pid,sk,avg<250?'turbo':'fast');}
+    const avg=g/(r.length-1), cur=(cart[sku]&&cart[sku].sizes[sk])||0;
+    if(avg<600){delta=cur<5?1:5;setSpeedDot(sku,sk,avg<250?'turbo':'fast');}
   }
-  changeQty(pid,sk,delta);
+  changeQty(sku,sk,delta);
 }
 
-function setSpeedDot(pid,sk,speed){
-  document.querySelectorAll(`#sqd-${pid}-${sk}`).forEach(el=>{
+function setSpeedDot(sku,sk,speed){
+  document.querySelectorAll(`[data-q="${domId(sku)}-${sk}"]`).forEach(el=>{
     el.classList.remove('fast','turbo');
     if(speed==='fast')el.classList.add('fast');
     if(speed==='turbo')el.classList.add('turbo');
   });
 }
 
-function totalQty()    {return Object.values(cart).reduce((a,e)=>a+Object.values(e.sizes).reduce((x,v)=>x+v,0),0);}
+function totalQty()    {return Object.values(cart).reduce((a,e)=>a+entryQty(e),0);}
 function totalDesigns(){return Object.keys(cart).length;}
-function sizeTotals()  {const t={a3:0,a4:0,a5:0,pocket:0};Object.values(cart).forEach(e=>SIZES.forEach(s=>{t[s.key]+=(e.sizes[s.key]||0);}));return t;}
+function sizeTotals()  {const t={};ALL_SIZES.forEach(s=>t[s.key]=0);Object.values(cart).forEach(e=>ALL_SIZES.forEach(s=>{t[s.key]+=(e.sizes[s.key]||0);}));return t;}
 
 function syncUI(){
   const tq=totalQty(),td=totalDesigns();
@@ -721,9 +766,9 @@ function syncUI(){
   if(!tq){bar.classList.add('hidden');badge.style.display='none';return;}
   bar.classList.remove('hidden');badge.textContent=tq;badge.style.display='flex';
   const st=sizeTotals();
-  const ss=SIZES.filter(s=>st[s.key]>0).map(s=>`${st[s.key]} ${s.label}`).join(' · ');
+  const ss=ALL_SIZES.filter(s=>st[s.key]>0).map(s=>`${st[s.key]} ${s.label}`).join(' · ');
   document.getElementById('barSummary').innerHTML=
-    `<strong>${tq}</strong> poster${tq!==1?'s':''} · <strong>${td}</strong> design${td!==1?'s':''}<br><span style="font-size:10px;color:var(--text3)">${ss}</span>`;
+    `<strong>${tq}</strong> item${tq!==1?'s':''} · <strong>${td}</strong> design${td!==1?'s':''}<br><span style="font-size:10px;color:var(--text3)">${ss}</span>`;
   const av=document.querySelector('.view.active'),btn=document.getElementById('barBtn');
   if(av&&btn){
     const vid=av.id;
@@ -743,55 +788,59 @@ function renderCart(){
     return;
   }
   const tq=totalQty();
-  sub.textContent=`${keys.length} design${keys.length!==1?'s':''} · ${tq} poster${tq!==1?'s':''}`;
+  sub.textContent=`${plural(keys.length,'design')} · ${plural(tq,'item')}`;
   const rows=[];
-  keys.forEach(k=>{const e=cart[k];SIZES.forEach(s=>{if((e.sizes[s.key]||0)>0)rows.push({k,s,e,qty:e.sizes[s.key]});});});
+  keys.forEach(k=>{const e=cart[k];sizesFor(e.kind).forEach(s=>{if((e.sizes[s.key]||0)>0)rows.push({k,s,e,qty:e.sizes[s.key]});});});
   const st=sizeTotals();
   con.innerHTML=`
     <div class="summary-grid">
-      <div class="stat-card"><div class="stat-label">Total Posters</div><div class="stat-val">${tq}</div><div class="stat-sub">all sizes</div></div>
+      <div class="stat-card"><div class="stat-label">Total Items</div><div class="stat-val">${tq}</div><div class="stat-sub">all sizes</div></div>
       <div class="stat-card"><div class="stat-label">Designs</div><div class="stat-val">${keys.length}</div><div class="stat-sub">unique</div></div>
       <div class="stat-card"><div class="stat-label">Line Items</div><div class="stat-val">${rows.length}</div><div class="stat-sub">variants</div></div>
     </div>
-    <div class="size-breakdown"><h4>By size</h4>${SIZES.filter(s=>st[s.key]>0).map(s=>`
+    <div class="size-breakdown"><h4>By size</h4>${ALL_SIZES.filter(s=>st[s.key]>0).map(s=>`
       <div class="breakdown-row">
         <div class="breakdown-left"><span class="bd-badge${s.key==='pocket'?' pocket':''}">${s.label}</span>${s.dim}</div>
-        <span class="breakdown-count">${st[s.key]} poster${st[s.key]!==1?'s':''}</span>
+        <span class="breakdown-count">${st[s.key]}</span>
       </div>`).join('')}</div>
     <div class="cart-table-wrap">
       <table class="cart-table">
-        <thead><tr><th></th><th>Poster</th><th style="text-align:center">Qty</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Design</th><th style="text-align:center">Qty</th><th></th></tr></thead>
         <tbody>${rows.map(({k,s,e,qty})=>`
           <tr>
-            <td style="width:46px"><img class="ct-img" src="${thumb(e.id)}" onerror="this.style.display='none'"/></td>
-            <td><div class="ct-name">${esc(cleanName(e.name))}</div><span class="ct-sb${s.key==='pocket'?' pocket':''}">${s.label} · ${s.dim}</span></td>
+            <td style="width:46px"><img class="ct-img" src="${thumbFor(k)}" loading="lazy" onerror="this.style.visibility='hidden'"/></td>
+            <td><div class="ct-name">${esc(k)}</div><span class="ct-sb${s.key==='pocket'?' pocket':''}">${s.label} · ${s.dim}${products[k]?'':' · no longer in catalogue'}</span></td>
             <td style="text-align:center">
               <div class="ct-qty-adj">
-                <button class="adj-btn" onclick="cartAdj('${k}','${s.key}',-1)">−</button>
+                <button class="adj-btn" onclick="cartAdj('${esc(k)}','${s.key}',-1)">−</button>
                 <span class="ct-qty-val">${qty}</span>
-                <button class="adj-btn" onclick="cartAdj('${k}','${s.key}',1)">+</button>
+                <button class="adj-btn" onclick="cartAdj('${esc(k)}','${s.key}',1)">+</button>
               </div>
             </td>
-            <td style="width:32px"><button class="ct-remove" onclick="cartDel('${k}','${s.key}')">✕</button></td>
+            <td style="width:32px"><button class="ct-remove" onclick="cartDel('${esc(k)}','${s.key}')">✕</button></td>
           </tr>`).join('')}</tbody>
       </table>
     </div>
     <button class="checkout-cta" onclick="showView('checkout')">Proceed to Checkout →</button>
-    <button class="back-to-browse" onclick="showView('store')">← Continue Shopping</button>`;
+    <button class="back-to-browse" onclick="showView('store')">← Continue Shopping</button>
+    <button class="back-to-browse" onclick="clearCart()" style="color:var(--text3)">Clear cart</button>`;
 }
 
-function cartAdj(k,sk,d){if(!cart[k])return;cart[k].sizes[sk]=Math.max(0,(cart[k].sizes[sk]||0)+d);if(Object.values(cart[k].sizes).reduce((a,v)=>a+v,0)===0)delete cart[k];syncUI();renderCart();}
-function cartDel(k,sk){if(!cart[k])return;cart[k].sizes[sk]=0;if(Object.values(cart[k].sizes).reduce((a,v)=>a+v,0)===0)delete cart[k];syncUI();renderCart();}
+function cartAdj(k,sk,d){if(!cart[k])return;cart[k].sizes[sk]=Math.max(0,(cart[k].sizes[sk]||0)+d);if(entryQty(cart[k])===0)delete cart[k];saveCart();refreshCardQty(k,sk);syncUI();renderCart();}
+function cartDel(k,sk){if(!cart[k])return;cart[k].sizes[sk]=0;if(entryQty(cart[k])===0)delete cart[k];saveCart();refreshCardQty(k,sk);syncUI();renderCart();}
+function clearCart(){const ks=Object.keys(cart);cart={};saveCart();ks.forEach(k=>ALL_SIZES.forEach(s=>refreshCardQty(k,s.key)));syncUI();renderCart();}
+function refreshCardQty(k,sk){
+  const q=(cart[k]&&cart[k].sizes[sk])||0;
+  document.querySelectorAll(`[data-q="${domId(k)}-${sk}"]`).forEach(el=>{el.textContent=q;el.classList.toggle('active',q>0);});
+}
 
 // ── CHECKOUT ──────────────────────────────────────────────────────────────────
 function renderCheckoutMini(){
   const tq=totalQty(),st=sizeTotals();
   document.getElementById('checkoutMini').innerHTML=
-    `<strong>${totalDesigns()} design${totalDesigns()!==1?'s':''}</strong> · <strong>${tq} poster${tq!==1?'s':''}</strong><br>
-     <span style="color:var(--text3);font-size:11px">${SIZES.filter(s=>st[s.key]>0).map(s=>`${st[s.key]}× ${s.label}`).join('  ·  ')}</span>`;
+    `<strong>${plural(totalDesigns(),'design')}</strong> · <strong>${plural(tq,'item')}</strong><br>
+     <span style="color:var(--text3);font-size:11px">${ALL_SIZES.filter(s=>st[s.key]>0).map(s=>`${st[s.key]}× ${s.label}`).join('  ·  ')}</span>`;
 }
-
-function val(id){return(document.getElementById(id)||{}).value?.trim()||'';}
 
 function placeOrder(){
   const name=val('chkName'),phone=val('chkPhone'),email=val('chkEmail');
@@ -806,14 +855,17 @@ function placeOrder(){
   if(!pin){alert('Please enter your PIN code.');document.getElementById('chkPin').focus();return;}
   const fullAddress=street+', '+city+', '+state+' - '+pin+', '+country;
   const items=[];
-  Object.values(cart).forEach(e=>{SIZES.forEach(s=>{if((e.sizes[s.key]||0)>0)items.push({sku:makeSKU(e.name,s.key),design:cleanName(e.name),type:s.label,dim:s.dim,qty:e.sizes[s.key]});});});
+  Object.values(cart).forEach(e=>{sizesFor(e.kind).forEach(s=>{if((e.sizes[s.key]||0)>0)items.push({sku:lineSku(e.sku,s.key),design:e.sku,category:(products[e.sku]||{}).cat||'',type:s.label,dim:s.dim,qty:e.sizes[s.key]});});});
   if(!items.length){alert('Cart is empty.');return;}
   lastOrder={customer:{name,phone,email,address:fullAddress,street,city,state,pin,country,note},items,date:new Date().toLocaleString('en-IN')};
   const xlsxB64=buildExcelBase64(lastOrder);
   const fn='Posterwa_Order_'+name.replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.xlsx';
+  // Order is placed: empty the saved cart, keep contact/address for next time (drop the one-off note).
+  cart={};saveCart();
+  const ce=document.getElementById('chkNote');if(ce)ce.value='';saveCheckout();
   showView('success');
   const total=items.reduce((a,r)=>a+r.qty,0);
-  let iLines='';items.forEach(i=>{iLines+=i.design+' — '+i.type+' ×'+i.qty+'\n';});
+  let iLines='';items.forEach(i=>{iLines+=i.sku+' — '+i.type+' ×'+i.qty+'\n';});
   const c=lastOrder.customer;
   const bin=atob(xlsxB64);const bytes=new Uint8Array(bin.length);
   for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
@@ -843,8 +895,8 @@ function buildExcelBase64(order){
   const wb=XLSX.utils.book_new();
   const tq=items.reduce((a,r)=>a+r.qty,0);
   const bt={};items.forEach(r=>{bt[r.type]=(bt[r.type]||0)+r.qty;});
-  const ws1=XLSX.utils.aoa_to_sheet([['SKU','Design Name','Product Type','Dimensions','Quantity'],...items.map(r=>[r.sku,r.design,r.type,r.dim,r.qty]),[],[,'','','TOTAL POSTERS',tq],[],['SIZE SUMMARY'],...Object.entries(bt).map(([t,q])=>[t,'','','',q])]);
-  ws1['!cols']=[{wch:24},{wch:30},{wch:16},{wch:18},{wch:12}];
+  const ws1=XLSX.utils.aoa_to_sheet([['SKU','Design','Category','Product Type','Dimensions','Quantity'],...items.map(r=>[r.sku,r.design,r.category,r.type,r.dim,r.qty]),[],['','','','','TOTAL',tq],[],['SIZE SUMMARY'],...Object.entries(bt).map(([t,q])=>[t,'','','','',q])]);
+  ws1['!cols']=[{wch:24},{wch:22},{wch:14},{wch:14},{wch:16},{wch:10}];
   XLSX.utils.book_append_sheet(wb,ws1,'Order Lines');
   const ws2=XLSX.utils.aoa_to_sheet([['Order Date',date],['Name',c.name],['Phone',c.phone],['Email',c.email],['Street',c.street],['City',c.city],['State',c.state],['PIN',c.pin],['Country',c.country],['Address',c.address],['Note',c.note],[],['Status','Pending']]);
   ws2['!cols']=[{wch:20},{wch:50}];
@@ -859,34 +911,21 @@ function showView(name){
   document.getElementById('view'+name[0].toUpperCase()+name.slice(1)).classList.add('active');
   if(name==='cart')renderCart();
   if(name==='checkout')renderCheckoutMini();
+  if(name==='store'){
+    // quantities may have changed in cart/search: refresh the visible store cards
+    document.querySelectorAll('#storeContent [data-q]').forEach(el=>{
+      const i=el.dataset.q.lastIndexOf('-'),sk=el.dataset.q.slice(i+1),id=el.dataset.q.slice(0,i);
+      const e=Object.values(cart).find(x=>domId(x.sku)===id);const q=e?(e.sizes[sk]||0):0;
+      el.textContent=q;el.classList.toggle('active',q>0);
+    });
+  }
   syncUI();window.scrollTo(0,0);
 }
 function resetAndGoStore(){
-  cart={};lastOrder=null;syncUI();
-  ['chkName','chkPhone','chkEmail','chkStreet','chkCity','chkState','chkPin','chkNote'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  const cc=document.getElementById('chkCountry');if(cc)cc.value='India';
+  cart={};lastOrder=null;saveCart();syncUI();
   document.getElementById('sendingNote').textContent='';
   clearSearch();showView('store');
 }
-
-// ── JSONP ─────────────────────────────────────────────────────────────────────
-function jsonpCall(params,timeout){
-  return new Promise((resolve,reject)=>{
-    const cb='pw_'+Date.now();
-    const timer=setTimeout(()=>{delete window[cb];document.getElementById(cb)?.remove();reject(new Error('Timed out. Open in Chrome incognito.'));},timeout||20000);
-    window[cb]=data=>{clearTimeout(timer);delete window[cb];document.getElementById(cb)?.remove();resolve(data);};
-    const s=document.createElement('script');
-    s.id=cb;s.src=APPS_SCRIPT_URL+'?'+params+'&callback='+cb;
-    s.onerror=()=>{clearTimeout(timer);delete window[cb];s.remove();reject(new Error('Script blocked. Try Chrome incognito.'));};
-    document.head.appendChild(s);
-  });
-}
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-function thumb(id){return`https://drive.google.com/thumbnail?id=${id}&sz=w300`;}
-function cleanName(n){return(n||'').replace(/\.[^.]+$/,'').replace(/[-_]/g,' ').replace(/\s+/g,' ').trim();}
-function makeSKU(name,size){return`PW-${(name||'').replace(/\.[^.]+$/,'').replace(/[^a-zA-Z0-9]/g,'').toUpperCase().slice(0,8)}-${size.toUpperCase()}`;}
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 </script>
 </body>
 </html>
