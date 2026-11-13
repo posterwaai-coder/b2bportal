@@ -205,6 +205,10 @@
     .product-card.is-sticker .card-img-wrap img{object-fit:contain;padding:10px;}
     .card-img-wrap .card-img-placeholder{font-size:24px;opacity:.3;}
     .product-card{content-visibility:auto;contain-intrinsic-size:auto 190px auto 420px;}
+    /* ── IMAGE PROTECTION: no right-click save, drag-out, or long-press save ── */
+    .card-img-wrap img,.ct-img,.pill-img-wrap img{pointer-events:none;-webkit-user-drag:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;}
+    .card-img-wrap::after{content:"";position:absolute;inset:0;z-index:1;}
+    .card-img-wrap,.pill-img-wrap{-webkit-touch-callout:none;user-select:none;-webkit-user-select:none;}
   </style>
 </head>
 <body>
@@ -226,7 +230,7 @@
 <div class="search-bar">
   <div class="search-inner">
     <span class="si">🔍</span>
-    <input type="text" id="searchInput" placeholder="Search posters or categories…" oninput="onSearch(this.value)" autocomplete="off"/>
+    <input type="text" id="searchInput" placeholder="Search — e.g. luffy wanted, friends, virat…" oninput="onSearch(this.value)" autocomplete="off"/>
     <button class="sclear" id="searchClear" onclick="clearSearch()">✕ Clear</button>
   </div>
 </div>
@@ -463,6 +467,13 @@ function loadCheckout(){
   CHK_FIELDS.forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('input',saveCheckout);});
 }
 
+// ── IMAGE PROTECTION ─────────────────────────────────────────────────────────
+// Stops casual saving (right-click, drag to desktop, long-press, Cmd/Ctrl+S). Screenshots can't be blocked by any website.
+const PROTECTED = '.card-img-wrap, .ct-img, .pill-img-wrap, img';
+document.addEventListener('contextmenu', e => { if (e.target.closest && e.target.closest(PROTECTED)) e.preventDefault(); });
+document.addEventListener('dragstart', e => { if (e.target.closest && e.target.closest(PROTECTED)) e.preventDefault(); });
+document.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') e.preventDefault(); });
+
 // ── LOAD ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
   loadCart();
@@ -500,8 +511,10 @@ function applyCatalog(data, keepScroll){
   categories = data.categories;
   products = {};
   categories.forEach(cat => {
-    cat.posters.forEach(([sku,t]) => { products[sku] = {sku, t, cat:cat.name, kind:'poster'}; });
-    cat.stickers.forEach(([sku,t]) => { products[sku] = {sku, t, cat:cat.name, kind:'sticker'}; });
+    const add = kind => ([sku,t,kw]) => { products[sku] = {sku, t, cat:cat.name, kind,
+      hay:(sku+' '+sku.replace(/\d+/g,' ')+' '+cat.name+' '+(kw||'')).toLowerCase()}; };
+    cat.posters.forEach(add('poster'));
+    cat.stickers.forEach(add('sticker'));
   });
   renderPills();
   renderStore();
@@ -536,7 +549,7 @@ function renderPills() {
   pills.innerHTML = categories.map((cat, i) => {
     const cover = (cat.posters[0] || cat.stickers[0] || [])[1];
     const imgHTML = cover
-      ? `<div class="pill-img-wrap"><img src="${thumbUrl(cover)}" alt="" loading="lazy" decoding="async"></div>`
+      ? `<div class="pill-img-wrap"><img src="${thumbUrl(cover)}" alt="" draggable="false" loading="lazy" decoding="async"></div>`
       : `<div class="pill-icon">🎨</div>`;
     return `<div class="cat-pill" id="pill-${i}" onclick="scrollToCategory(${i})">
       ${imgHTML}
@@ -635,7 +648,7 @@ function cardHTML(sku) {
   return `
     <div class="product-card${p.kind==='sticker'?' is-sticker':''}">
       <div class="card-img-wrap">
-        <img src="${thumbUrl(p.t)}" alt="${esc(sku)}" loading="lazy" decoding="async" width="400" height="580"
+        <img src="${thumbUrl(p.t)}" alt="${esc(sku)}" draggable="false" loading="lazy" decoding="async" width="300" height="435"
           onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'card-img-placeholder',textContent:'🖼'}))"/>
       </div>
       <div class="card-body">
@@ -663,14 +676,19 @@ function onSearch(q) {
 
 function doSearch(q) {
   if (!q) return;
-  const ql = q.toLowerCase().replace(/\s+/g,'');
+  const terms = q.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const joined = terms.join('');
   const groups = [];
   categories.forEach(cat => {
-    const nameHit = cat.name.toLowerCase().includes(ql);
-    const pick = list => (nameHit ? list : list.filter(([sku]) => sku.toLowerCase().replace(/\s+/g,'').includes(ql))).map(([sku])=>sku);
+    const match = sku => { const h = products[sku].hay;
+      return terms.every(t => h.includes(t)) || (joined.length > 2 && sku.toLowerCase().replace(/\s+/g,'').includes(joined)); };
+    const rank = sku => { const k = sku.toLowerCase(); return terms.some(t => k.includes(t)) ? 0 : 1; }; // SKU hits first
+    const pick = list => list.map(([sku]) => sku).filter(match).map((sku, i) => [rank(sku), i, sku]).sort((x, y) => x[0] - y[0] || x[1] - y[1]).map(x => x[2]);
     const posters = pick(cat.posters), stickers = pick(cat.stickers);
-    if (posters.length || stickers.length) groups.push({cat, posters, stickers});
+    if (posters.length || stickers.length) groups.push({cat, posters, stickers,
+      direct: [...posters, ...stickers].filter(k => terms.some(t => k.toLowerCase().includes(t))).length});
   });
+  groups.sort((a, b) => b.direct - a.direct); // collection with the most SKU-name hits first
 
   const sc = document.getElementById('searchContent');
   if (!groups.length) {
@@ -808,7 +826,7 @@ function renderCart(){
         <thead><tr><th></th><th>Design</th><th style="text-align:center">Qty</th><th></th></tr></thead>
         <tbody>${rows.map(({k,s,e,qty})=>`
           <tr>
-            <td style="width:46px"><img class="ct-img" src="${thumbFor(k)}" loading="lazy" onerror="this.style.visibility='hidden'"/></td>
+            <td style="width:46px"><img class="ct-img" draggable="false" src="${thumbFor(k)}" loading="lazy" onerror="this.style.visibility='hidden'"/></td>
             <td><div class="ct-name">${esc(k)}</div><span class="ct-sb${s.key==='pocket'?' pocket':''}">${s.label} · ${s.dim}${products[k]?'':' · no longer in catalogue'}</span></td>
             <td style="text-align:center">
               <div class="ct-qty-adj">
